@@ -30,10 +30,10 @@
 #define SENSOR_D5 25 // Rightmost
 
 // Motor Driver Pins (Maker Robo ESP32)
-#define MOTOR_LEFT_PWM 13
-#define MOTOR_LEFT_DIR 12
-#define MOTOR_RIGHT_PWM 27
-#define MOTOR_RIGHT_DIR 14
+#define MOTOR_LEFT_PWM 27
+#define MOTOR_LEFT_DIR 14
+#define MOTOR_RIGHT_PWM 13
+#define MOTOR_RIGHT_DIR 12
 
 // LEDC PWM Configuration
 #define PWM_FREQ 20000    // 20kHz - above audible range for quiet operation
@@ -43,20 +43,21 @@
 // ==================== PID TUNING PARAMETERS ====================
 // N20 motors are ~3x faster and more responsive than TT motors
 // Lower gains needed to prevent oscillation and overshoot
-#define KP 12.0 // Proportional gain (was 25 for TT - reduced for faster N20)
-#define KI 0.5  // Integral gain - eliminates steady-state error
-#define KD                                                                     \
-  8.0 // Derivative gain (was 15 for TT - reduced, less inertia to dampen)
+#define KP                                                                     \
+  10.0 // Proportional gain (research: ~10-15 for digital ±5 error range)
+#define KI 0.0 // Integral gain (research: 0 for fast N20 - PD only is standard)
+#define KD 12.0 // Derivative gain (research: ~1-2x Kp for digital sensors)
 
 // Integral windup limit
 #define INTEGRAL_MAX 200 // Prevents integral term from accumulating too much
 
 // ==================== SPEED SETTINGS ====================
 // N20 @ 600RPM is ~3x faster than TT @ ~200RPM, so scale down PWM values
-#define BASE_SPEED 180 // Normal cruising speed (was 320 for TT)
+#define BASE_SPEED 200 // Normal cruising speed
 #define MAX_SPEED 400  // Maximum motor speed (was 720 for TT)
 #define MIN_SPEED 80 // Minimum speed - N20 has lower deadband than TT (was 160)
-#define SEARCH_SPEED 200 // Speed when searching for lost line (was 360 for TT)
+#define SEARCH_SPEED 160     // Max speed when searching for lost line
+#define SEARCH_SPEED_MIN 100 // Initial slow search speed to avoid overshoot
 
 // ==================== SENSOR WEIGHTS ====================
 // Weights for error calculation: leftmost = -4, rightmost = +4
@@ -67,10 +68,12 @@ const int WEIGHT_D4 = 2;  // Right
 const int WEIGHT_D5 = 4;  // Rightmost
 
 // ==================== VARIABLES ====================
-int s1, s2, s3, s4, s5;  // Sensor readings
-float lastError = 0;     // For derivative calculation
-float integral = 0;      // For integral calculation
-int searchDirection = 1; // 1 = search right, -1 = search left
+int s1, s2, s3, s4, s5;            // Sensor readings
+float lastError = 0;               // For derivative calculation
+float integral = 0;                // For integral calculation
+int searchDirection = 1;           // 1 = search right, -1 = search left
+unsigned long searchStartTime = 0; // When search mode began
+bool wasSearching = false;         // Track if we were searching last loop
 
 // ==================== SETUP ====================
 void setup() {
@@ -180,14 +183,34 @@ void applyMotorSpeeds(int correction) {
 
   // Check if line is lost (all sensors white)
   if (s1 == 0 && s2 == 0 && s3 == 0 && s4 == 0 && s5 == 0) {
-    // Search mode - spin toward last known direction
-    if (searchDirection > 0) {
-      leftSpeed = SEARCH_SPEED;
-      rightSpeed = -SEARCH_SPEED / 2;
+    if (!wasSearching) {
+      // Just lost the line - brake briefly to kill momentum
+      searchStartTime = millis();
+      wasSearching = true;
+      leftSpeed = 0;
+      rightSpeed = 0;
     } else {
-      leftSpeed = -SEARCH_SPEED / 2;
-      rightSpeed = SEARCH_SPEED;
+      // Progressive search: start slow, ramp up over 500ms
+      unsigned long elapsed = millis() - searchStartTime;
+      int speed = SEARCH_SPEED_MIN;
+      if (elapsed > 50) { // Brief brake for first 50ms
+        speed = map(constrain(elapsed, 50, 500), 50, 500, SEARCH_SPEED_MIN,
+                    SEARCH_SPEED);
+      } else {
+        speed = 0; // Still braking
+      }
+      // Gentle arc: one wheel forward, other stopped (not reversed)
+      if (searchDirection > 0) {
+        leftSpeed = speed;
+        rightSpeed = 0;
+      } else {
+        leftSpeed = 0;
+        rightSpeed = speed;
+      }
     }
+  } else {
+    // Line found - reset search state
+    wasSearching = false;
   }
 
   // Constrain speeds
